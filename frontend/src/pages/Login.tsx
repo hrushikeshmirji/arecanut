@@ -20,6 +20,7 @@ export default function Login() {
   const [showPassword, setShowPassword] = useState(false)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [error, setError] = useState("")
+  const isDemoAuthEnabled = import.meta.env.VITE_DEMO_AUTH === "true"
   const [systemDark, setSystemDark] = useState(() => window.matchMedia("(prefers-color-scheme: dark)").matches)
   const isDark = theme === "dark" || (theme === "system" && systemDark)
   const loginPalette = {
@@ -149,8 +150,10 @@ export default function Login() {
               </div>
             </div>
 
+            {isDemoAuthEnabled && <p className="mt-3 text-center text-[11px] leading-5 text-muted-foreground">Frontend demo access only. This session is stored in this browser and does not authenticate with a server.</p>}
+
             <div className="mt-7 border-t border-border pt-5 text-center">
-              <p className="text-xs leading-5 text-muted-foreground">New to ArecaVision? <Link to="/register" className="font-semibold text-primary hover:underline">Create an account</Link></p>
+              {!isDemoAuthEnabled && <p className="text-xs leading-5 text-muted-foreground">New to ArecaVision? <Link to="/register" className="font-semibold text-primary hover:underline">Create an account</Link></p>}
               <Link to="/" className="mt-4 inline-block text-xs font-semibold text-primary hover:underline">Back to ArecaVision home</Link>
             </div>
           </div>

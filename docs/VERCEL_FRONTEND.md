@@ -24,3 +24,7 @@ This value is compiled into the browser bundle, so it is public configuration an
 The current local `.env.production` points to `http://localhost:8001/api/v1`; that address is not reachable by Vercel visitors. Without a deployed backend, the landing page and static UI can load, but login, profile updates, saved data, weather, and real image analysis will not work. The existing mock mode can simulate scan results, but authentication still calls the backend.
 
 The backend must be hosted separately with HTTPS and allow requests from the deployed Vercel origin. The repository's current backend CORS configuration is permissive; tighten it to the deployed frontend origin before using real accounts publicly.
+
+## Frontend-only demo login
+
+If you are deploying only the frontend for a presentation, set `VITE_DEMO_AUTH=true` in the Vercel project environment and redeploy. The login page will accept `farmer@arecavision.ai` / `farmer123` and keep a demo session in that browser. This is a presentation-only client-side session, not real authentication; do not use it to protect private data. Leave it unset or set it to `false` when using a backend. Registration is disabled while frontend demo auth is enabled.

@@ -17,8 +17,30 @@ import { safeGetItem, safeSetItem, safeRemoveItem } from "../utils/safeStorage"
 
 const STORAGE_TOKEN_KEY = AUTH_TOKEN_KEY
 const STORAGE_USER_KEY = "arecavision_auth_user"
+const DEMO_AUTH_ENABLED = import.meta.env.VITE_DEMO_AUTH === "true"
+
+function createDemoUser(email: string): UserTokenPayload {
+  return {
+    id: "demo-farmer",
+    username: "farmer",
+    name: "Ramesh Gowda",
+    email,
+    role: "farmer",
+  }
+}
 
 export async function loginUser(credentials: LoginRequest): Promise<AuthResponse> {
+  if (DEMO_AUTH_ENABLED) {
+    const email = credentials.email.trim().toLowerCase()
+    if (email !== "farmer@arecavision.ai" || credentials.password !== "farmer123") {
+      throw new Error("Invalid demo credentials. Use farmer@arecavision.ai and farmer123.")
+    }
+    safeRemoveItem(STORAGE_TOKEN_KEY)
+    const user = createDemoUser(email)
+    safeSetItem(STORAGE_USER_KEY, JSON.stringify(user))
+    return { user }
+  }
+
   const res = await apiRequest<AuthResponse>("/auth/login", {
     method: "POST",
     body: JSON.stringify(credentials),
@@ -33,6 +55,10 @@ export async function loginUser(credentials: LoginRequest): Promise<AuthResponse
 }
 
 export async function registerUser(data: RegisterRequest): Promise<AuthResponse> {
+  if (DEMO_AUTH_ENABLED) {
+    throw new Error("Registration is unavailable in frontend demo mode.")
+  }
+
   const res = await apiRequest<AuthResponse>("/auth/register", {
     method: "POST",
     body: JSON.stringify(data),
@@ -47,6 +73,14 @@ export async function registerUser(data: RegisterRequest): Promise<AuthResponse>
 }
 
 export async function updateUserProfile(data: Pick<UserTokenPayload, "username" | "email" | "name">): Promise<UserTokenPayload> {
+  if (DEMO_AUTH_ENABLED) {
+    const currentUser = getStoredUser()
+    if (!currentUser || currentUser.id !== "demo-farmer") throw new Error("Demo session not found. Please sign in again.")
+    const updatedUser = { ...currentUser, ...data }
+    safeSetItem(STORAGE_USER_KEY, JSON.stringify(updatedUser))
+    return updatedUser
+  }
+
   const user = await apiRequest<UserTokenPayload>("/auth/me", {
     method: "PUT",
     body: JSON.stringify(data),
@@ -57,6 +91,12 @@ export async function updateUserProfile(data: Pick<UserTokenPayload, "username" 
 }
 
 export async function logoutUser(): Promise<void> {
+  if (DEMO_AUTH_ENABLED) {
+    safeRemoveItem(STORAGE_TOKEN_KEY)
+    safeRemoveItem(STORAGE_USER_KEY)
+    return
+  }
+
   try {
     await apiRequest<void>("/auth/logout", {
       method: "POST",
@@ -73,6 +113,17 @@ export async function logoutUser(): Promise<void> {
 export async function refreshUserSession(): Promise<AuthResponse | null> {
   const savedUser = safeGetItem(STORAGE_USER_KEY)
   if (!savedUser) return null
+
+  if (DEMO_AUTH_ENABLED) {
+    try {
+      const user = JSON.parse(savedUser) as UserTokenPayload
+      if (user.id !== "demo-farmer" || user.role !== "farmer") return null
+      return { user }
+    } catch {
+      safeRemoveItem(STORAGE_USER_KEY)
+      return null
+    }
+  }
 
   try {
     const res = await apiRequest<AuthResponse>("/auth/refresh", {
