@@ -27,4 +27,4 @@ The backend must be hosted separately with HTTPS and allow requests from the dep
 
 ## Frontend-only demo login
 
-If you are deploying only the frontend for a presentation, set `VITE_DEMO_AUTH=true` in the Vercel project environment and redeploy. The login page will accept `farmer@arecavision.ai` / `farmer123` and keep a demo session in that browser. This is a presentation-only client-side session, not real authentication; do not use it to protect private data. Leave it unset or set it to `false` when using a backend. Registration is disabled while frontend demo auth is enabled.
+If you are deploying only the frontend for a presentation, set `VITE_DEMO_AUTH=true` in the Vercel project environment and redeploy. The login page will accept any username and password, then open the default farmer profile and keep a demo session in that browser. This is a presentation-only client-side bypass, not authentication; do not use it to protect private data. Leave it unset or set it to `false` when using a backend. Registration is disabled while frontend demo auth is enabled.

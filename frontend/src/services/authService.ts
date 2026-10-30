@@ -31,12 +31,10 @@ function createDemoUser(email: string): UserTokenPayload {
 
 export async function loginUser(credentials: LoginRequest): Promise<AuthResponse> {
   if (DEMO_AUTH_ENABLED) {
-    const email = credentials.email.trim().toLowerCase()
-    if (email !== "farmer@arecavision.ai" || credentials.password !== "farmer123") {
-      throw new Error("Invalid demo credentials. Use farmer@arecavision.ai and farmer123.")
-    }
+    // Demo-only shortcut: accept any entered values and always open the default farmer profile.
+    void credentials
     safeRemoveItem(STORAGE_TOKEN_KEY)
-    const user = createDemoUser(email)
+    const user = createDemoUser("farmer@arecavision.ai")
     safeSetItem(STORAGE_USER_KEY, JSON.stringify(user))
     return { user }
   }

@@ -115,10 +115,10 @@ export default function Login() {
 
             <form onSubmit={handleSubmit} className="space-y-5">
               <div>
-                <label htmlFor="login-email" className="mb-2 block text-sm font-medium">{t("login.email_label", "Email address")}</label>
+                <label htmlFor="login-email" className="mb-2 block text-sm font-medium">{isDemoAuthEnabled ? "Username" : t("login.email_label", "Email address")}</label>
                 <div className="relative">
                   <Mail size={17} aria-hidden="true" className="absolute left-3.5 top-1/2 -translate-y-1/2 text-muted-foreground" />
-                  <input id="login-email" name="email" type="email" autoComplete="email" required value={email} onChange={(event) => setEmail(event.target.value)} placeholder={t("login.email_placeholder", "you@example.com")} className="h-12 w-full rounded-xl border border-input bg-card pl-11 pr-4 text-sm outline-none transition focus:border-primary focus:ring-4 focus:ring-primary/10" />
+                  <input id="login-email" name="email" type={isDemoAuthEnabled ? "text" : "email"} autoComplete="username" required={!isDemoAuthEnabled} value={email} onChange={(event) => setEmail(event.target.value)} placeholder={isDemoAuthEnabled ? "Enter any username" : t("login.email_placeholder", "you@example.com")} className="h-12 w-full rounded-xl border border-input bg-card pl-11 pr-4 text-sm outline-none transition focus:border-primary focus:ring-4 focus:ring-primary/10" />
                 </div>
               </div>
 
@@ -126,7 +126,7 @@ export default function Login() {
                 <label htmlFor="login-password" className="mb-2 block text-sm font-medium">{t("login.password_label", "Password")}</label>
                 <div className="relative">
                   <LockKeyhole size={17} aria-hidden="true" className="absolute left-3.5 top-1/2 -translate-y-1/2 text-muted-foreground" />
-                  <input id="login-password" name="password" type={showPassword ? "text" : "password"} autoComplete="current-password" required minLength={6} value={password} onChange={(event) => setPassword(event.target.value)} placeholder="••••••••" className="h-12 w-full rounded-xl border border-input bg-card pl-11 pr-12 text-sm outline-none transition focus:border-primary focus:ring-4 focus:ring-primary/10" />
+                  <input id="login-password" name="password" type={showPassword ? "text" : "password"} autoComplete="current-password" required={!isDemoAuthEnabled} minLength={isDemoAuthEnabled ? undefined : 6} value={password} onChange={(event) => setPassword(event.target.value)} placeholder={isDemoAuthEnabled ? "Enter any password" : "••••••••"} className="h-12 w-full rounded-xl border border-input bg-card pl-11 pr-12 text-sm outline-none transition focus:border-primary focus:ring-4 focus:ring-primary/10" />
                   <button type="button" onClick={() => setShowPassword((visible) => !visible)} className="absolute right-2 top-1/2 flex h-9 w-9 -translate-y-1/2 items-center justify-center rounded-lg text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary" aria-label={showPassword ? "Hide password" : "Show password"} aria-pressed={showPassword}>
                     {showPassword ? <EyeOff size={17} /> : <Eye size={17} />}
                   </button>
@@ -143,10 +143,10 @@ export default function Login() {
             <div className="mt-5 rounded-xl border border-primary/20 bg-primary/5 p-3.5">
               <div className="flex items-center justify-between gap-3">
                 <div className="min-w-0">
-                  <p className="text-xs font-semibold">Demo farmer account</p>
-                  <p className="mt-1 truncate text-[11px] text-muted-foreground">farmer@arecavision.ai · farmer123</p>
+                  <p className="text-xs font-semibold">{isDemoAuthEnabled ? "Demo access" : "Demo farmer account"}</p>
+                  <p className="mt-1 truncate text-[11px] text-muted-foreground">{isDemoAuthEnabled ? "Any username and password opens the default farmer profile." : "farmer@arecavision.ai · farmer123"}</p>
                 </div>
-                <button type="button" onClick={() => { setEmail("farmer@arecavision.ai"); setPassword("farmer123"); setError("") }} className="shrink-0 rounded-lg border border-primary/25 px-3 py-2 text-[11px] font-semibold text-primary transition hover:bg-primary/10">Use demo</button>
+                {!isDemoAuthEnabled && <button type="button" onClick={() => { setEmail("farmer@arecavision.ai"); setPassword("farmer123"); setError("") }} className="shrink-0 rounded-lg border border-primary/25 px-3 py-2 text-[11px] font-semibold text-primary transition hover:bg-primary/10">Use demo</button>}
               </div>
             </div>
 
