@@ -144,3 +144,8 @@
 *.stl                filter=lfs diff=lfs merge=lfs -text
 *.nc                 filter=lfs diff=lfs merge=lfs -text
 *.mat                filter=lfs diff=lfs merge=lfs -text
+
+# Frontend static assets are shipped with the Vercel build as regular Git files.
+# This avoids depending on Git LFS checkout settings during deployment.
+public/**            -filter -diff -merge -text
+src/images/**        -filter -diff -merge -text
