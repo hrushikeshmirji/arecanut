@@ -1,0 +1,321 @@
+"""
+Hybrid Inference Engine — YOLOv8 + Vision Transformer
+=====================================================
+1. YOLOv8 detects lesion bounding boxes on the leaf image.
+2. Each detected region is cropped and classified by a fine-tuned ViT.
+3. If no bounding boxes are found, the whole image is classified as fallback.
+4. Exports vit_model and vit_processor for explainability and downstream use.
+"""
+
+from __future__ import annotations
+
+import os
+import logging
+from pathlib import Path
+from typing import List, Dict, Any, Optional
+
+import torch
+from PIL import Image
+from ultralytics import YOLO
+from transformers import ViTForImageClassification, ViTImageProcessor
+
+logger = logging.getLogger(__name__)
+
+# ── Paths ────────────────────────────────────────────────────────────────────
+_BASE_DIR = Path(__file__).resolve().parent
+_YOLO_WEIGHTS = _BASE_DIR / "weights" / "best.pt"
+_VIT_V2_DIR = _BASE_DIR / "weights" / "vit_areca_classifier_v2"
+_VIT_DIR = _VIT_V2_DIR
+
+# ── Device selection ─────────────────────────────────────────────────────────
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+logger.info("Inference device: %s", device)
+
+# ── Load ViT Model & Processor ───────────────────────────────────────────────
+if not _VIT_DIR.exists():
+    raise FileNotFoundError(f"ViT checkpoint not found at {_VIT_DIR}")
+
+logger.info("Loading ViT classifier from %s", _VIT_DIR)
+vit_processor = ViTImageProcessor.from_pretrained(str(_VIT_DIR))
+vit_model = ViTForImageClassification.from_pretrained(str(_VIT_DIR))
+vit_model.to(device)
+vit_model.eval()
+
+# ── YOLO Model Holder (Singleton) ────────────────────────────────────────────
+_yolo_model: YOLO | None = None
+
+
+def _load_yolo() -> YOLO:
+    """Load the YOLOv8 model (singleton)."""
+    global _yolo_model
+    if _yolo_model is None:
+        if not _YOLO_WEIGHTS.exists():
+            raise FileNotFoundError(f"YOLOv8 weights not found at {_YOLO_WEIGHTS}")
+        logger.info("Loading YOLOv8 from %s", _YOLO_WEIGHTS)
+        _yolo_model = YOLO(str(_YOLO_WEIGHTS))
+    return _yolo_model
+
+
+import cv2
+import numpy as np
+
+id2label = vit_model.config.id2label
+label2id = vit_model.config.label2id
+
+ARECA_CLASSES = [
+    "bud_borer", "fruit_rot", "healthy_leaf", "healthy_nut",
+    "healthy_trunk", "stem_bleeding", "stem_cracking", "yellow_leaf"
+]
+areca_ids = [label2id[c] for c in ARECA_CLASSES if c in label2id]
+non_areca_id = label2id.get("non_areca", None)
+fruit_rot_id = label2id.get("fruit_rot", None)
+
+
+def _botanical_sanity_check(pil_img: Image.Image) -> bool:
+    """
+    Validates whether the image contains natural botanical/plant features.
+    Filters out studio white backgrounds (e.g. white/marble tabletop > 50%)
+    or images with virtually zero plant/bark/leaf/nut HSV signatures (< 4%).
+    """
+    small = pil_img.resize((160, 160))
+    arr = np.array(small.convert("RGB"))
+    hsv = cv2.cvtColor(arr, cv2.COLOR_RGB2HSV)
+    h, s, v = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
+    total = arr.shape[0] * arr.shape[1]
+
+    # Studio white / bright gray background check
+    white_studio_ratio = float(np.sum((s < 35) & (v > 200)) / total)
+
+    # Natural botanical signatures (green leaves, yellowing fronds, brown bark / dried rot)
+    green_mask = (h >= 25) & (h <= 95) & (s >= 25) & (v >= 25)
+    yellow_mask = (h >= 14) & (h < 25) & (s >= 30) & (v >= 30)
+    brown_mask = (h >= 5) & (h < 25) & (s >= 20) & (s <= 230) & (v >= 18) & (v <= 190)
+    botanical_ratio = float(np.sum(green_mask | yellow_mask | brown_mask) / total)
+
+    if white_studio_ratio > 0.50 or botanical_ratio < 0.04:
+        return False
+    return True
+
+
+def _detect_fruit_rot_signatures(pil_img: Image.Image) -> bool:
+    """
+    Detects visual signatures of fruit rot (Koleroga / Mahali):
+    - Necrotic dark brown/black decaying nut tissues (H in [6, 25], S >= 40, V in [25, 125])
+    - White felt-like fungal mycelium (Phytophthora meadii) on nut surfaces (S <= 30, V >= 185)
+    """
+    w, h = pil_img.size
+    if w < 20 or h < 20:
+        return False
+    cw, ch = max(10, int(w * 0.70)), max(10, int(h * 0.70))
+    left = (w - cw) // 2
+    top = (h - ch) // 2
+    center_crop = pil_img.crop((left, top, left + cw, top + ch)).resize((160, 160))
+    arr = np.array(center_crop.convert("RGB"))
+    hsv = cv2.cvtColor(arr, cv2.COLOR_RGB2HSV)
+    h, s, v = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
+    total = arr.shape[0] * arr.shape[1]
+
+    necrotic_rot = (h >= 6) & (h <= 25) & (s >= 40) & (v >= 25) & (v <= 125)
+    mycelium_mask = (s <= 30) & (v >= 185)
+
+    rot_ratio = float(np.sum(necrotic_rot) / total)
+    mycelium_ratio = float(np.sum(mycelium_mask) / total)
+
+    return (rot_ratio >= 0.08 or mycelium_ratio >= 0.05)
+
+
+def _classify_patch(patch: Image.Image) -> Dict[str, Any]:
+    """
+    Run 3-view multi-crop Test-Time Augmentation (TTA) with OOD gating,
+    temperature scaling, and fruit rot tie-breaker for high-confidence internet image diagnosis.
+    """
+    w, h = patch.size
+    if w < 16 or h < 16:
+        view1 = patch
+        view2 = patch
+        view3 = patch
+    else:
+        cw, ch = max(8, int(w * 0.75)), max(8, int(h * 0.75))
+        left = (w - cw) // 2
+        top = (h - ch) // 2
+        view1 = patch
+        view2 = patch.crop((left, top, left + cw, top + ch))
+        view3 = view2.transpose(Image.FLIP_LEFT_RIGHT)
+
+    inputs = vit_processor(images=[view1, view2, view3], return_tensors="pt").to(device)
+
+    with torch.no_grad():
+        outputs = vit_model(**inputs)
+        logits_batch = outputs.logits  # shape (3, num_classes)
+        probs_batch = torch.nn.functional.softmax(logits_batch, dim=-1)
+
+    # Confidence-weighted aggregation across the 3 views
+    weights = probs_batch.max(dim=-1).values
+    weights = weights / (weights.sum() + 1e-8)
+    agg_probs = (probs_batch * weights.unsqueeze(-1)).sum(dim=0)
+    agg_logits = (logits_batch * weights.unsqueeze(-1)).sum(dim=0)
+
+    # Calculate entropy on aggregated probabilities
+    probs_np = agg_probs.cpu().numpy()
+    non_zero = probs_np[probs_np > 1e-7]
+    entropy = float(-np.sum(non_zero * np.log2(non_zero)))
+
+    # Non-Areca & Botanical Check
+    p_na = float(agg_probs[non_areca_id].item()) if non_areca_id is not None else 0.0
+    top_areca_prob = float(agg_probs[areca_ids].max().item()) if areca_ids else 0.0
+    top_areca_across_crops = max([probs_batch[k, areca_ids].max().item() for k in range(3)]) if areca_ids else 0.0
+    passes_botanical = _botanical_sanity_check(patch)
+
+    # Trigger OOD / Non-Areca rejection if:
+    # 1. Botanical check fails (e.g. studio white tabletop > 50% or zero plant signatures < 4%)
+    # 2. Non-areca probability is greater than or equal to the top arecanut class probability
+    # 3. High entropy (> 1.80) with elevated non_areca probability (> 0.20)
+    # 4. Non-areca probability alone exceeds 35%
+    is_ood = (
+        (not passes_botanical) or
+        (p_na >= top_areca_prob) or
+        (p_na > 0.20 and entropy > 1.80) or
+        (p_na > 0.35)
+    )
+
+    if is_ood:
+        # Genuine out-of-distribution non-arecanut image
+        conf_val = round(max(p_na, 0.75), 4)
+        top_probabilities = [
+            {"disease": vit_model.config.id2label[i], "probability": round(float(p), 4)}
+            for i, p in enumerate(probs_np)
+        ]
+        top_probabilities.sort(key=lambda x: x["probability"], reverse=True)
+        return {
+            "disease": "non_areca",
+            "raw_disease": "non_areca",
+            "confidence": conf_val,
+            "is_areca": False,
+            "entropy": round(entropy, 4),
+            "probabilities": top_probabilities[:3],
+        }
+
+    # Valid Arecanut Image: zero out non_areca logit so it does not dilute arecanut classes
+    areca_logits = agg_logits.clone()
+    if non_areca_id is not None:
+        areca_logits[non_areca_id] = -1e9
+
+    if areca_ids:
+        top2_values, top2_indices = torch.topk(areca_logits[areca_ids], k=min(2, len(areca_ids)))
+        top2_names = [vit_model.config.id2label[areca_ids[i.item()]] for i in top2_indices]
+    else:
+        top2_names = []
+
+    # Fruit Rot (Koleroga/Mahali) sensitivity tie-breaker
+    p_fruit_rot = float(agg_probs[fruit_rot_id].item()) if fruit_rot_id is not None else 0.0
+    if fruit_rot_id is not None:
+        if ("fruit_rot" in top2_names or p_fruit_rot > 0.15) and _detect_fruit_rot_signatures(patch):
+            areca_logits[fruit_rot_id] += 3.0
+
+    # Temperature scaling across arecanut classes (T=0.5 for confident peak)
+    scaled_probs = torch.nn.functional.softmax(areca_logits[areca_ids] / 0.5, dim=-1)
+    best_idx = scaled_probs.argmax().item()
+    winning_label = vit_model.config.id2label[areca_ids[best_idx]]
+    winning_conf = round(float(scaled_probs[best_idx].item()), 4)
+
+    # Re-build top probabilities for arecanut classes
+    areca_probs_list = [
+        {"disease": vit_model.config.id2label[areca_ids[i]], "probability": round(float(p.item()), 4)}
+        for i, p in enumerate(scaled_probs)
+    ]
+    areca_probs_list.sort(key=lambda x: x["probability"], reverse=True)
+
+    # Raw top label prior to temperature scaling
+    raw_idx = agg_probs.argmax().item()
+    raw_disease = vit_model.config.id2label[raw_idx]
+
+    return {
+        "disease": winning_label,
+        "raw_disease": raw_disease,
+        "confidence": winning_conf,
+        "is_areca": True,
+        "entropy": round(entropy, 4),
+        "probabilities": areca_probs_list[:3],
+    }
+
+
+def run_hybrid_inference(image_path: str) -> List[Dict[str, Any]]:
+    """
+    Execute the full hybrid detection pipeline with OOD gating.
+    """
+    if not os.path.isfile(image_path):
+        raise FileNotFoundError(f"Image not found: {image_path}")
+
+    pil_image = Image.open(image_path).convert("RGB")
+    w, h = pil_image.size
+
+    # ── Step 0: Holistic Whole-Image OOD Check ───────────────────────────
+    whole_img_eval = _classify_patch(pil_image)
+    if not whole_img_eval["is_areca"] or whole_img_eval["disease"] == "non_areca":
+        logger.info(
+            "Whole-image OOD gating triggered: classified as non_areca (conf: %s, entropy: %s)",
+            whole_img_eval["confidence"],
+            whole_img_eval["entropy"],
+        )
+        return [{
+            "disease": "non_areca",
+            "confidence": whole_img_eval["confidence"],
+            "bbox": None,
+            "is_areca": False,
+            "entropy": whole_img_eval["entropy"],
+            "probabilities": whole_img_eval["probabilities"],
+        }]
+
+    # ── Step 1: YOLO detection for valid arecanut images ─────────────────
+    yolo = _load_yolo()
+    results = yolo.predict(source=image_path, conf=0.25, verbose=False)
+    detections: List[Dict[str, Any]] = []
+
+    if results and len(results) > 0:
+        boxes = results[0].boxes
+        if boxes is not None and len(boxes) > 0:
+            for box in boxes:
+                xyxy = box.xyxy[0].cpu().tolist()
+                x1, y1, x2, y2 = [int(v) for v in xyxy]
+
+                x1, y1 = max(0, x1), max(0, y1)
+                x2, y2 = min(w, x2), min(h, y2)
+
+                patch = pil_image.crop((x1, y1, x2, y2))
+                if patch.width < 10 or patch.height < 10:
+                    continue
+
+                result = _classify_patch(patch)
+                if result["is_areca"] and result["disease"] != "non_areca":
+                    detections.append({
+                        "disease": result["disease"],
+                        "confidence": result["confidence"],
+                        "bbox": [x1, y1, x2, y2],
+                        "is_areca": True,
+                        "probabilities": result["probabilities"],
+                    })
+
+    # ── Step 2: Fallback to whole-image classification ───────────────────
+    if not detections:
+        logger.info("No valid YOLO lesion boxes — using whole-image ViT diagnosis")
+        detections.append({
+            "disease": whole_img_eval["disease"],
+            "confidence": whole_img_eval["confidence"],
+            "bbox": [0, 0, w, h],
+            "is_areca": True,
+            "probabilities": whole_img_eval["probabilities"],
+        })
+
+    detections.sort(key=lambda d: d["confidence"], reverse=True)
+    return detections
+
+
+# ── Explainability Helper Export ─────────────────────────────────────────────
+try:
+    from backend.xai_pipeline import generate_5_stage_xai
+except ImportError:
+    try:
+        from xai_pipeline import generate_5_stage_xai
+    except ImportError:
+        generate_5_stage_xai = None
+

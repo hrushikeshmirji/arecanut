@@ -1,0 +1,9 @@
+<resources>
+    <style name="Theme.ArecaVision" parent="android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:colorAccent">#0D7657</item>
+        <item name="android:statusBarColor">#F4F7F1</item>
+        <item name="android:navigationBarColor">#F4F7F1</item>
+        <item name="android:windowLightStatusBar">true</item>
+    </style>
+</resources>

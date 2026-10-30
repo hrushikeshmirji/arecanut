@@ -1,0 +1,69 @@
+# Local environment files (keep sample templates)
+.env
+.env.*
+!.env.example
+**/.env
+**/.env.*
+!**/.env.example
+
+# Python caches and local environments
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+
+# JavaScript dependencies and build output
+**/node_modules/
+**/dist/
+**/build/
+**/.vercel/
+**/.gradle/
+**/.kotlin/
+.vite/
+coverage/
+playwright-report/
+test-results/
+*.tsbuildinfo
+
+# Local IDE and OS files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Runtime data and secrets
+temp_uploads/
+backend/temp_uploads/
+logs/
+*.log
+*.sqlite
+*.sqlite3
+*.db
+
+# Model checkpoints and generated model artifacts
+backend/weights/
+*.pt
+*.pth
+*.onnx
+*.safetensors
+
+# Local datasets and downloaded source archives
+crop_negatives_raw/
+/dataset*/
+palm_negatives_raw/
+mendeley_raw/
+
+# Generated reports and legacy copies
+evaluation_reports/
+report_figures/
+dataset_verification_grid.png
+ArecaVision_Combined/
+frontend_backup_previous/
+*.zip
+*.7z

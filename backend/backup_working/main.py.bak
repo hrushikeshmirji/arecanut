@@ -1,0 +1,290 @@
+from fastapi import FastAPI, UploadFile, File
+from fastapi.middleware.cors import CORSMiddleware
+from PIL import Image
+import shutil
+import os
+import uuid
+from pathlib import Path
+
+# ── ViT Model Checkpoint Configuration ───────────────────────────────────────
+BASE_DIR = Path(__file__).resolve().parent
+VIT_CHECKPOINT_DIR = BASE_DIR / "weights" / "vit_areca_classifier_v2"
+if not VIT_CHECKPOINT_DIR.exists():
+    VIT_CHECKPOINT_DIR = BASE_DIR / "weights" / "vit_areca_classifier"
+
+from detector import run_hybrid_inference, vit_model, vit_processor
+from recommendations import get_recommendation
+from explainability import ViTGradCAM
+try:
+    from backend.xai_pipeline import generate_5_stage_xai
+except ImportError:
+    from xai_pipeline import generate_5_stage_xai
+
+
+# ── Label-to-Disease Routing Dictionary ──────────────────────────────────────
+LABEL_TO_DISEASE = {
+    # 9 Canonical Classes from Clean Verified Dataset
+    "fruit_rot": "fruit_rot",
+    "yellow_leaf": "yellow_leaf",
+    "stem_bleeding": "stem_bleeding",
+    "bud_borer": "bud_borer",
+    "stem_cracking": "stem_cracking",
+    "healthy_nut": "healthy_nut",
+    "healthy_leaf": "healthy_leaf",
+    "healthy_trunk": "healthy_trunk",
+    "non_areca": "non_areca",
+    # Aliases & Legacy Names
+    "male koleroga": "fruit_rot",
+    "mahali_koleroga": "fruit_rot",
+    "koleroga": "fruit_rot",
+    "foot_rot": "foot_rot",
+    "anabe_roga": "foot_rot",
+    "basal_stem_rot": "foot_rot",
+    "yellow leaf": "yellow_leaf",
+    "yellow_leaf_disease": "yellow_leaf",
+    "stem cracking": "stem_cracking",
+    "Bud borer": "bud_borer",
+    "healthy leaf": "healthy_leaf",
+    "healthy foot": "healthy_trunk",
+    "Leaf_Spot": "Leaf_Spot",
+    "spindle_bug": "spindle_bug",
+}
+
+app = FastAPI(title="ArecaGuard AI Engine")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+UPLOAD_DIR = "temp_uploads"
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+# Initialize Grad-CAM explainer
+gradcam_explainer = ViTGradCAM(vit_model)
+
+
+@app.get("/")
+async def root():
+    return {
+        "service": "ArecaGuard AI Engine",
+        "status": "running",
+        "version": "1.3.0",
+        "guardrail": "OOD Non-Arecanut Gating + Uncertainty Guardrail (<60% confidence)",
+    }
+
+
+@app.post("/api/diagnose")
+@app.post("/predict")
+async def diagnose(file: UploadFile = File(...)):
+    # Generate unique filename to avoid concurrency collisions while keeping extension
+    orig_name = file.filename or "upload.jpg"
+    ext = Path(orig_name).suffix or ".jpg"
+    unique_name = f"{uuid.uuid4().hex}_{orig_name}"
+    file_path = os.path.join(UPLOAD_DIR, unique_name)
+
+    try:
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+
+        detections = run_hybrid_inference(file_path)
+        primary = max(detections, key=lambda x: x["confidence"])
+
+        raw_img = Image.open(file_path).convert("RGB")
+
+        # Encode clean display copy of original image
+        try:
+            scale = min(1.0, 800 / max(raw_img.width, raw_img.height))
+            disp_w = max(16, int(raw_img.width * scale))
+            disp_h = max(16, int(raw_img.height * scale))
+            disp_img = raw_img.resize((disp_w, disp_h), Image.Resampling.LANCZOS)
+            import io, base64
+            buf = io.BytesIO()
+            disp_img.save(buf, format="JPEG", quality=85)
+            original_b64 = f"data:image/jpeg;base64,{base64.b64encode(buf.getvalue()).decode('utf-8')}"
+        except Exception:
+            original_b64 = None
+
+        # ── OOD & Non-Areca Rejection Gating ─────────────────────────────────
+        is_areca = primary.get("is_areca", True) and (primary["disease"] != "non_areca")
+        if not is_areca:
+            treatment = get_recommendation("non_areca")
+            return {
+                "disease_id": "non_areca",
+                "primary_disease": "non_areca",
+                "is_areca": False,
+                "confidence": primary["confidence"],
+                "bbox": None,
+                "all_detections": [],
+                "severity": "invalid",
+                "treatment_guidelines": treatment,
+                "gradcam_heatmap": None,
+                "original_image": original_b64,
+                "yolo_detection_image": None,
+                "feature_map_image": None,
+                "attention_map_image": None,
+                "gradcam_image": None,
+                "xai_stages": {
+                    "original": original_b64,
+                    "yolo": None,
+                    "feature_map": None,
+                    "attention_map": None,
+                    "gradcam": None,
+                },
+                "primary": {
+                    "disease": "non_areca",
+                    "disease_id": "non_areca",
+                    "confidence": primary["confidence"],
+                    "bbox": None,
+                    "is_areca": False,
+                    "severity": "invalid",
+                    "recommendation": treatment,
+                    "gradcam": None,
+                    "original_image": original_b64,
+                    "yolo_detection_image": None,
+                    "feature_map_image": None,
+                    "attention_map_image": None,
+                    "gradcam_image": None,
+                    "xai_stages": {
+                        "original": original_b64,
+                        "yolo": None,
+                        "feature_map": None,
+                        "attention_map": None,
+                        "gradcam": None,
+                    },
+                },
+                "total_detections": 0,
+                "gradcam_image": None,
+            }
+
+        # Safely extract bbox
+        if primary.get("bbox") and len(primary["bbox"]) == 4:
+            x1, y1, x2, y2 = primary["bbox"]
+        else:
+            x1, y1, x2, y2 = 0, 0, raw_img.width, raw_img.height
+
+        # If YOLO detected a box, explain that patch; otherwise explain whole image
+        target_crop = raw_img.crop((x1, y1, x2, y2)) if (x2 > x1 and y2 > y1) else raw_img
+        heatmap_base64 = gradcam_explainer.generate_heatmap(target_crop, vit_processor)
+
+        # Generate Safe Additive 5-Stage Explainability
+        try:
+            xai_stages = generate_5_stage_xai(
+                raw_img=raw_img,
+                vit_model=vit_model,
+                vit_processor=vit_processor,
+                gradcam_explainer=gradcam_explainer,
+                detections=detections,
+                primary=primary,
+                max_dim=800,
+            )
+        except Exception as exc:
+            xai_stages = {
+                "original_image": original_b64,
+                "yolo_detection_image": None,
+                "feature_map_image": None,
+                "attention_map_image": None,
+                "gradcam_image": heatmap_base64,
+            }
+
+        if not xai_stages.get("original_image"):
+            xai_stages["original_image"] = original_b64
+        if not xai_stages.get("gradcam_image"):
+            xai_stages["gradcam_image"] = heatmap_base64
+
+        # Uncertainty Guardrail (<60% confidence)
+        if primary["confidence"] < 0.60:
+            treatment = {
+                "disease_name": "Uncertain / Unrecognized Pattern",
+                "common_name": "Uncertain / Unrecognized Pattern",
+                "symptoms": "Low confidence match (<60%). Symptoms do not closely match the standard recognized arecanut classes.",
+                "severity_level": "unknown",
+                "chemical_treatment": "Do not apply chemical sprays without laboratory confirmation.",
+                "cultural_measures": "Isolate the affected palm or sample until diagnosed.",
+                "fertilizer_plan": "Maintain routine baseline palm nutrition.",
+                "chemical": {
+                    "title": "Chemical Caution",
+                    "steps": [
+                        "Do not apply chemical sprays without laboratory confirmation.",
+                        "Consult local ICAR-CPCRI or KVK agricultural extension officers.",
+                    ],
+                },
+                "cultural": {
+                    "title": "Cultural Sanitation",
+                    "steps": [
+                        "Isolate the affected palm or sample until definitive diagnosis.",
+                        "Monitor nearby palms closely for progressive symptom spread.",
+                    ],
+                },
+                "fertilizer": {
+                    "title": "Fertilizer Schedule",
+                    "steps": [
+                        "Maintain routine baseline palm nutrition.",
+                        "Avoid excessive nitrogen application until confirmed.",
+                    ],
+                },
+            }
+        else:
+            disease_key = LABEL_TO_DISEASE.get(primary["disease"], primary["disease"])
+            treatment = get_recommendation(disease_key)
+
+        return {
+            "disease_id": primary["disease"],
+            "primary_disease": primary["disease"],
+            "is_areca": True,
+            "confidence": primary["confidence"],
+            "bbox": primary["bbox"],
+            "all_detections": detections,
+            "severity": treatment.get("severity_level", "unknown"),
+            "treatment_guidelines": treatment,
+            "gradcam_heatmap": heatmap_base64,
+            # ── 5-Stage Explainability Fields ────────────────────────────────
+            "original_image": xai_stages.get("original_image"),
+            "yolo_detection_image": xai_stages.get("yolo_detection_image"),
+            "feature_map_image": xai_stages.get("feature_map_image"),
+            "attention_map_image": xai_stages.get("attention_map_image"),
+            "gradcam_image": heatmap_base64,
+            "xai_stages": {
+                "original": xai_stages.get("original_image"),
+                "yolo": xai_stages.get("yolo_detection_image"),
+                "feature_map": xai_stages.get("feature_map_image"),
+                "attention_map": xai_stages.get("attention_map_image"),
+                "gradcam": heatmap_base64,
+            },
+            # Backwards compatibility fields for frontend integrations
+            "primary": {
+                "disease": primary["disease"],
+                "disease_id": primary["disease"],
+                "confidence": primary["confidence"],
+                "bbox": primary["bbox"],
+                "is_areca": True,
+                "severity": treatment.get("severity_level", "unknown"),
+                "recommendation": treatment,
+                "gradcam": heatmap_base64,
+                "original_image": xai_stages.get("original_image"),
+                "yolo_detection_image": xai_stages.get("yolo_detection_image"),
+                "feature_map_image": xai_stages.get("feature_map_image"),
+                "attention_map_image": xai_stages.get("attention_map_image"),
+                "gradcam_image": heatmap_base64,
+                "xai_stages": {
+                    "original": xai_stages.get("original_image"),
+                    "yolo": xai_stages.get("yolo_detection_image"),
+                    "feature_map": xai_stages.get("feature_map_image"),
+                    "attention_map": xai_stages.get("attention_map_image"),
+                    "gradcam": heatmap_base64,
+                },
+            },
+            "total_detections": len(detections),
+            "gradcam_image": heatmap_base64,
+        }
+
+    finally:
+        # Clean up temporary upload
+        if os.path.exists(file_path):
+            try:
+                os.remove(file_path)
+            except OSError:
+                pass
